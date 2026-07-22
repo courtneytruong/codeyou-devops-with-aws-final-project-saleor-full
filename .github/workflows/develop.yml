@@ -34,7 +34,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install pip-audit and Poetry
-        run: pip install pip-audit poetry
+        run: pip install pip-audit poetry==1.8.4 poetry-plugin-export
 
       - name: Export requirements from Poetry lockfile
         working-directory: saleor-api
