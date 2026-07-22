@@ -1,0 +1,99 @@
+name: Develop
+
+on:
+  push:
+    branches: [develop]
+
+jobs:
+  lint:
+    name: Static Code Analysis (Ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ruff
+        run: pip install ruff
+
+      - name: Run Ruff
+        working-directory: saleor-api
+        continue-on-error: true
+        run: ruff check .
+
+  dependency-audit:
+    name: Dependency Analysis (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit and Poetry
+        run: pip install pip-audit poetry
+
+      - name: Export requirements from Poetry lockfile
+        working-directory: saleor-api
+        run: poetry export --without-hashes -f requirements.txt -o requirements-audit.txt
+
+      - name: Run pip-audit
+        working-directory: saleor-api
+        continue-on-error: true
+        run: pip-audit -r requirements-audit.txt
+
+  build-scan-push:
+    name: Build, Scan, and Push (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    needs: [lint, dependency-audit]
+    strategy:
+      matrix:
+        include:
+          - image: saleor-api
+            context: ./saleor-api
+            container_port: 8000
+            health_path: /graphql/
+          - image: saleor-dashboard
+            context: ./saleor-dashboard
+            container_port: 80
+            health_path: /
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t ${{ matrix.image }}:develop ${{ matrix.context }}
+
+      - name: Run health check
+        run: |
+          docker run -d --name health-check -p 8080:${{ matrix.container_port }} ${{ matrix.image }}:develop
+          sleep 10
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8080${{ matrix.health_path }}" || echo "000")
+          echo "Health check returned status $STATUS"
+          docker logs health-check
+          docker rm -f health-check
+          if [ "$STATUS" != "200" ] && [ "$STATUS" != "404" ]; then
+            echo "Health check failed with status $STATUS"
+            exit 1
+          fi
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
+        with:
+          image-ref: ${{ matrix.image }}:develop
+          format: table
+          exit-code: "0"
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Push image to DockerHub
+        run: |
+          docker tag ${{ matrix.image }}:develop ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:develop
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:develop

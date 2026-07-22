@@ -1,0 +1,91 @@
+name: Production
+
+on:
+  push:
+    branches: [production]
+
+jobs:
+  staging-completeness-check:
+    name: Ensure Staging Completeness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start the stack
+        run: docker compose up -d --build
+
+      - name: Wait for services to become healthy
+        run: |
+          services="api dashboard db redis"
+          for i in $(seq 1 30); do
+            unhealthy=0
+            for s in $services; do
+              cid=$(docker compose ps -q "$s")
+              status=$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "none")
+              echo "$s: $status"
+              if [ "$status" != "healthy" ]; then
+                unhealthy=1
+              fi
+            done
+            if [ "$unhealthy" -eq 0 ]; then
+              echo "All services are healthy"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Services failed to become healthy in time"
+          docker compose logs
+          exit 1
+
+      - name: Tear down the stack
+        if: always()
+        run: docker compose down -v
+
+  build-and-push:
+    name: Build and Push (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    needs: staging-completeness-check
+    strategy:
+      matrix:
+        include:
+          - image: saleor-api
+            context: ./saleor-api
+          - image: saleor-dashboard
+            context: ./saleor-dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t ${{ matrix.image }}:production ${{ matrix.context }}
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Tag and push production + latest
+        run: |
+          docker tag ${{ matrix.image }}:production ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:production
+          docker tag ${{ matrix.image }}:production ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:production
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest
+
+  deploy-to-aws:
+    name: Deploy to Amazon ECS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Force new ECS deployment
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER_NAME }}" \
+            --service "${{ vars.ECS_SERVICE_NAME }}" \
+            --force-new-deployment
