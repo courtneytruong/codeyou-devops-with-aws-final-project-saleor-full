@@ -82,6 +82,10 @@ jobs:
               sleep 2
             done
 
+            docker run --rm --network health-check-net \
+              -e DATABASE_URL=postgres://saleor:saleor@health-check-db:5432/saleor \
+              ${{ matrix.image }}:develop python3 manage.py migrate --no-input
+
             docker run -d --name health-check --network health-check-net \
               -e DATABASE_URL=postgres://saleor:saleor@health-check-db:5432/saleor \
               -p 8080:${{ matrix.container_port }} ${{ matrix.image }}:develop
