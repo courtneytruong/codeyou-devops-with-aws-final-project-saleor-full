@@ -68,12 +68,37 @@ jobs:
 
       - name: Run health check
         run: |
-          docker run -d --name health-check -p 8080:${{ matrix.container_port }} ${{ matrix.image }}:develop
+          docker network create health-check-net
+
+          if [ "${{ matrix.image }}" = "saleor-api" ]; then
+            docker run -d --name health-check-db --network health-check-net \
+              -e POSTGRES_USER=saleor -e POSTGRES_PASSWORD=saleor -e POSTGRES_DB=saleor \
+              postgres:15-alpine
+
+            for i in $(seq 1 30); do
+              if docker exec health-check-db pg_isready -U saleor > /dev/null 2>&1; then
+                break
+              fi
+              sleep 2
+            done
+
+            docker run -d --name health-check --network health-check-net \
+              -e DATABASE_URL=postgres://saleor:saleor@health-check-db:5432/saleor \
+              -p 8080:${{ matrix.container_port }} ${{ matrix.image }}:develop
+          else
+            docker run -d --name health-check --network health-check-net \
+              -p 8080:${{ matrix.container_port }} ${{ matrix.image }}:develop
+          fi
+
           sleep 10
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8080${{ matrix.health_path }}" || echo "000")
           echo "Health check returned status $STATUS"
           docker logs health-check
+
           docker rm -f health-check
+          docker rm -f health-check-db 2>/dev/null || true
+          docker network rm health-check-net
+
           if [ "$STATUS" != "200" ] && [ "$STATUS" != "404" ]; then
             echo "Health check failed with status $STATUS"
             exit 1
